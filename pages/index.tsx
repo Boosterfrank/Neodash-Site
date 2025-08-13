@@ -1,492 +1,335 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-type TabKey = 'hof' | 'levels' | 'submit';
+// ---- Small fetch helper (points to your backend) ---------------------------
+const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001").replace(/\/+$/, "");
 
-type SortBy = 'ratings' | 'newest' | 'downloads' | 'difficulty';
-type Difficulty = '' | 'A' | 'B' | 'C' | 'D' | 'E'; // '' = no filter
-
-type AuthResponse = { uniqueId: string; token: string };
-type HofRow = { rank: string; player: string; score: number };
-
-export interface LevelSummary {
-  levelId: string;           // decoded
-  levelAuthor: string;       // decoded
-  levelName: string;         // decoded
-  levelRating: number;
-  levelDifficulty: Difficulty | string;
-  levelDownloads: number;
+async function postJSON<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${res.status} ${text}`);
+  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
 }
 
-export interface LevelListResponse {
-  levels: LevelSummary[];
+// ---- Types -----------------------------------------------------------------
+export type SortBy = "ratings" | "downloads" | "recent";
+export type Difficulty = "" | "D" | "C" | "B" | "A" | "S" | "SS" | "SSS";
+
+interface AuthState { uniqueId: number; token: string; ok: boolean }
+
+interface LevelRow {
+  levelId: string;           // base64 id from server (decoded for UI below)
+  levelAuthor: string;       // base64 author (decoded for UI below)
+  levelRating: number;       // e.g. 4.4
+  levelDifficulty: string;   // e.g. "B"
+  levelDownloads: number;    // e.g. 1287
+}
+
+interface LevelListResponse {
+  levels: LevelRow[];
   hasMoreLevels: boolean;
-  page: number;
 }
 
-// --- helpers -------------------------------------------------------------
+interface HofEntry { player: string; time: string; map: string }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
-
-function b64decodeSafe(s: string): string {
-  try {
-    // The server uses plain base64 (not urlsafe) for names/ids.
-    return typeof window === 'undefined'
-      ? Buffer.from(s, 'base64').toString('utf-8')
-      : atob(s);
-  } catch {
-    return s;
-  }
-}
-
-function ordinal(n: number): string {
-  const v = n % 100;
-  if (v >= 11 && v <= 13) return `${n}th`;
-  switch (n % 10) {
-    case 1: return `${n}st`;
-    case 2: return `${n}nd`;
-    case 3: return `${n}rd`;
-    default: return `${n}th`;
-  }
-}
-
-// Parse raw HoF payload like: "QmFzZTY0TmFtZQ==,1234/...,5678/..." (game format)
-function parseHofRaw(raw: string): HofRow[] {
-  const out: { name: string; score: number }[] = [];
-  const parts = raw.trim().split(',');
-  if (parts.length < 2) return [];
-
-  try {
-    const firstName = b64decodeSafe(parts[0]);
-    const [firstScoreRaw] = parts[1].split('/');
-    const firstScore = parseInt(firstScoreRaw, 10);
-    if (!Number.isNaN(firstScore) && firstName.trim()) {
-      out.push({ name: firstName, score: firstScore });
-    }
-  } catch {
-    // ignore and try continuing
-  }
-
-  for (const p of parts.slice(2)) {
-    if (!p.includes('/')) continue;
-    const [scoreRaw, encName] = p.split('/');
-    const n = b64decodeSafe(encName ?? '');
-    const s = parseInt(scoreRaw, 10);
-    if (!Number.isNaN(s) && n.trim()) out.push({ name: n, score: s });
-  }
-
-  // sort desc score, stable
-  out.sort((a, b) => b.score - a.score);
-
-  // tie-aware ranks
-  const rows: HofRow[] = [];
-  let lastScore: number | null = null;
-  let displayRank = 0;
-  let place = 0;
-  for (const row of out) {
-    place += 1;
-    if (lastScore === null || row.score !== lastScore) {
-      displayRank = place;
-      lastScore = row.score;
-    }
-    rows.push({ rank: ordinal(displayRank), player: row.name, score: row.score });
-  }
-  return rows;
-}
-
-// --- UI atoms ------------------------------------------------------------
-
-type CardProps = {
-  title: string;
-  right?: React.ReactNode;
-  className?: string;
-  children?: React.ReactNode; // ✅ include children
-};
-
-const Card: React.FC<CardProps> = ({ title, right, className, children }) => (
-  <div className={`rounded-2xl bg-neutral-900/60 border border-neutral-800 shadow-xl ${className ?? ''}`}>
-    <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800">
-      <h3 className="text-neutral-200 font-semibold">{title}</h3>
-      {right}
+// ---- UI primitives ---------------------------------------------------------
+function Card(props: { title?: string; right?: React.ReactNode; className?: string; children?: React.ReactNode }) {
+  const { title, right, className, children } = props;
+  return (
+    <div className={`card ${className ?? ""}`}>
+      {(title || right) && (
+        <div className="cardHead">
+          {title && <h2>{title}</h2>}
+          <div className="spacer" />
+          {right}
+        </div>
+      )}
+      {children}
+      <style jsx>{`
+        .card { background:#0e1014; border:1px solid #1e2330; border-radius:14px; padding:16px; box-shadow:0 8px 22px rgba(0,0,0,.35);}
+        .cardHead{ display:flex; align-items:center; margin-bottom:12px;}
+        h2{ font-size:16px; font-weight:600; margin:0; color:#e6ebff; letter-spacing:.3px;}
+        .spacer{ flex:1 }
+      `}</style>
     </div>
-    <div className="p-5">{children}</div>
-  </div>
-);
+  );
+}
 
-const Button: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = ({ className, children, ...props }) => (
-  <button
-    {...props}
-    className={`px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white transition ${className ?? ''}`}
-  >
-    {children}
-  </button>
-);
+function Row(props:{label:string; children?:React.ReactNode}){
+  return (
+    <label className="row">
+      <span>{props.label}</span>
+      {props.children}
+      <style jsx>{`
+        .row{ display:grid; grid-template-columns:160px 1fr; align-items:center; gap:12px; margin:10px 0; }
+        .row>span{ color:#9fb0ff; font-size:13px; }
+        input, select { background:#0a0c10; color:#e6ebff; border:1px solid #2a3246; border-radius:10px; padding:10px 12px; outline:none; }
+        input:focus, select:focus{ border-color:#5580ff; box-shadow:0 0 0 3px rgba(85,128,255,.2);}
+        button { background:#1b2748; color:#e6ebff; border:1px solid #2a3a6a; border-radius:10px; padding:10px 14px; cursor:pointer; font-weight:600; letter-spacing:.2px;}
+        button:hover{ background:#21305a; }
+        button:disabled{ opacity:.5; cursor:not-allowed; }
+      `}</style>
+    </label>
+  );
+}
 
-const Input: React.FC<React.InputHTMLAttributes<HTMLInputElement>> = ({ className, ...props }) => (
-  <input
-    {...props}
-    className={`w-full px-3 py-2 rounded-xl bg-neutral-800 border border-neutral-700 text-neutral-100 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 ${className ?? ''}`}
-  />
-);
+function Tabs(props:{tabs:{key:string; label:string; badge?:string}[]; value:string; onChange:(k:string)=>void}){
+  const { tabs, value, onChange } = props;
+  return (
+    <div className="tabs">
+      {tabs.map(t => (
+        <button key={t.key} className={`tab ${t.key===value?"active":""}`} onClick={()=>onChange(t.key)}>
+          <span>{t.label}</span>{t.badge && <em>{t.badge}</em>}
+        </button>
+      ))}
+      <style jsx>{`
+        .tabs{ display:flex; gap:8px; flex-wrap:wrap; }
+        .tab{ background:#0e1322; border:1px solid #233158; color:#cbd7ff; padding:10px 14px; border-radius:999px; font-weight:600; }
+        .tab.active{ background:#2a3f7a; border-color:#3d5eea; color:white; }
+        .tab em{ margin-left:8px; background:#1f2b4e; border:1px solid #2f417a; padding:2px 8px; border-radius:999px; font-style:normal; font-size:12px;}
+      `}</style>
+    </div>
+  );
+}
 
-const Select: React.FC<React.SelectHTMLAttributes<HTMLSelectElement>> = ({ className, children, ...props }) => (
-  <select
-    {...props}
-    className={`w-full px-3 py-2 rounded-xl bg-neutral-800 border border-neutral-700 text-neutral-100 focus:outline-none focus:ring-2 focus:ring-indigo-600 ${className ?? ''}`}
-  >
-    {children}
-  </select>
-);
+// ---- Page ------------------------------------------------------------------
+export default function HomePage() {
+  // tabs
+  const [tab, setTab] = useState<string>("browser");
 
-// --- main page -----------------------------------------------------------
+  // auth
+  const [uniqueId, setUniqueId] = useState<string>("");
+  const [token, setToken] = useState<string>("");
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const authed = !!auth?.ok;
 
-const IndexPage: React.FC = () => {
-  const [tab, setTab] = useState<TabKey>('hof');
-
-  // shared auth
-  const [uniqueId, setUniqueId] = useState<string>('');
-  const [token, setToken] = useState<string>('');
-  const [authBusy, setAuthBusy] = useState<boolean>(false);
-  const [authError, setAuthError] = useState<string>('');
+  // browser
+  const [sortBy, setSortBy] = useState<SortBy>("ratings");
+  const [page, setPage] = useState<number>(1);
+  const [difficulty, setDifficulty] = useState<Difficulty>(""); // blank default
+  const [filter, setFilter] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const [levels, setLevels] = useState<LevelRow[]>([]);
+  const [hasMore, setHasMore] = useState<boolean>(false);
 
   // HOF
-  const [hofRows, setHofRows] = useState<HofRow[]>([]);
-  const [hofBusy, setHofBusy] = useState<boolean>(false);
-  const [hofError, setHofError] = useState<string>('');
+  const [hof, setHof] = useState<HofEntry[]>([]);
 
-  // Levels
-  const [levels, setLevels] = useState<LevelSummary[]>([]);
-  const [levelsBusy, setLevelsBusy] = useState<boolean>(false);
-  const [levelsError, setLevelsError] = useState<string>('');
-  const [page, setPage] = useState<number>(1);
-  const [hasMore, setHasMore] = useState<boolean>(false);
-  const [sortBy, setSortBy] = useState<SortBy>('ratings');
-  const [difficulty, setDifficulty] = useState<Difficulty>(''); // "" by default (no '+')
-  const [searchFilter, setSearchFilter] = useState<string>('');
-
-  const authenticate = useCallback(async () => {
-    setAuthBusy(true);
-    setAuthError('');
-    try {
-      const res = await fetch(`${API_BASE}/auth`, { method: 'POST' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: AuthResponse = await res.json();
-      setUniqueId(data.uniqueId);
-      setToken(data.token);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Auth failed';
-      setAuthError(msg);
-    } finally {
-      setAuthBusy(false);
-    }
+  const decodeBase64 = useCallback((b64: string): string => {
+    try { return Buffer.from(b64, "base64").toString("utf8"); } catch { return b64; }
   }, []);
 
-  const fetchHof = useCallback(async () => {
-    if (!uniqueId || !token) {
-      setHofError('Please authenticate first.');
-      return;
-    }
-    setHofBusy(true);
-    setHofError('');
+  const doAuth = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/hof`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uniqueId, token })
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text(); // backend may proxy raw text
-      const rows = parseHofRaw(text);
-      setHofRows(rows);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to fetch Hall of Fame';
-      setHofError(msg);
-    } finally {
-      setHofBusy(false);
-    }
+      setLoading(true);
+      const uid = Number(uniqueId);
+      const resp = await postJSON<{ ok:boolean }>("/authenticate", { uniqueId: uid, token: token.trim() });
+      setAuth({ uniqueId: uid, token: token.trim(), ok: resp.ok });
+      alert("Authenticated!");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Auth error: ${msg}`);
+    } finally { setLoading(false); }
   }, [uniqueId, token]);
 
   const fetchLevels = useCallback(async () => {
-    if (!uniqueId || !token) {
-      setLevelsError('Please authenticate first.');
-      return;
-    }
-    setLevelsBusy(true);
-    setLevelsError('');
     try {
-      const res = await fetch(`${API_BASE}/levels/list`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          uniqueId,
-          token,
-          sortBy,
-          page,
-          withThumbnails: false,
-          difficulty,      // NOTE: when "", we send empty (no '+')
-          searchFilter
-        })
+      setLoading(true);
+      const resp = await postJSON<LevelListResponse>("/requestLevelList", {
+        uniqueId: auth?.uniqueId ?? 0,
+        token: auth?.token ?? "",
+        sortBy,
+        page,
+        withThumbnails: false,
+        difficulty,
+        searchFilter: filter,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // Prefer JSON response. If your backend still returns raw, adapt here.
-      const data: LevelListResponse = await res.json();
-      setLevels(data.levels ?? []);
-      setHasMore(Boolean(data.hasMoreLevels));
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to fetch levels';
-      setLevelsError(msg);
-    } finally {
-      setLevelsBusy(false);
-    }
-  }, [uniqueId, token, sortBy, page, difficulty, searchFilter]);
+      setLevels(resp.levels);
+      setHasMore(!!resp.hasMoreLevels);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Fetch error: ${msg}`);
+    } finally { setLoading(false); }
+  }, [auth, sortBy, page, difficulty, filter]);
 
-  // refetch levels on filters/page change when on levels tab
-  useEffect(() => {
-    if (tab === 'levels' && uniqueId && token) {
-      void fetchLevels();
-    }
-  }, [tab, uniqueId, token, sortBy, page, difficulty, searchFilter, fetchLevels]);
+  const fetchHof = useCallback(async () => {
+    try {
+      setLoading(true);
+      const resp = await postJSON<{ entries:HofEntry[] }>("/hof", { page: 1 });
+      setHof(resp.entries);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`HOF error: ${msg}`);
+    } finally { setLoading(false); }
+  }, []);
 
-  // --- renderers ---------------------------------------------------------
-
-  const Tabs = (
-    <div className="flex gap-2">
-      {([
-        { k: 'hof', label: 'Hall of Fame' },
-        { k: 'levels', label: 'Level Browser' },
-        { k: 'submit', label: 'Submit Level (WIP)' },
-      ] as { k: TabKey; label: string }[]).map(({ k, label }) => (
-        <button
-          key={k}
-          onClick={() => setTab(k)}
-          className={`px-4 py-2 rounded-xl border transition
-            ${tab === k
-              ? 'bg-indigo-600 border-indigo-500 text-white'
-              : 'bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white hover:border-neutral-700'}`}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
+  useEffect(() => { if (tab === "hof" && hof.length === 0) void fetchHof(); }, [tab, hof.length, fetchHof]);
 
   return (
-    <main className="min-h-screen bg-black text-neutral-200">
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        <header className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold tracking-tight">Trackmania Helper</h1>
-          {Tabs}
-        </header>
+    <main>
+      <header>
+        <h1>NeoDash Toolkit</h1>
+        <div className="grow" />
+        <span className="badge">Backend: {API_BASE}</span>
+      </header>
 
-        {/* AUTH CARD (persistent at top) */}
-        <Card
-          title="Game Authentication"
-          right={
-            <div className="flex items-center gap-2">
-              <Button onClick={authenticate} disabled={authBusy}>
-                {authBusy ? 'Authenticating…' : 'Authenticate'}
-              </Button>
-            </div>
-          }
-        >
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <label className="text-sm text-neutral-400">Unique ID</label>
-              <Input value={uniqueId} onChange={(e) => setUniqueId(e.target.value)} placeholder="—" />
-            </div>
-            <div>
-              <label className="text-sm text-neutral-400">Token</label>
-              <Input value={token} onChange={(e) => setToken(e.target.value)} placeholder="—" />
-            </div>
-            <div className="flex items-end">
-              <div className="text-sm text-neutral-400">
-                Uses your backend proxy at <span className="text-neutral-300">{API_BASE || '(unset)'}</span>
-              </div>
-            </div>
-          </div>
-          {authError && <div className="mt-3 text-rose-400 text-sm">{authError}</div>}
-        </Card>
+      <Tabs
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { key: "browser", label: "Level Browser" },
+          { key: "hof", label: "Hall of Fame" },
+          { key: "submit", label: "Submit Level", badge: "WIP" },
+        ]}
+      />
 
-        <div className="mt-6 space-y-6">
-          {/* TAB: HOF */}
-          {tab === 'hof' && (
-            <Card
-              title="Hall of Fame"
-              right={<Button onClick={fetchHof} disabled={!uniqueId || !token || hofBusy}>
-                {hofBusy ? 'Fetching…' : 'Fetch Hall of Fame'}
-              </Button>}
-            >
-              {hofError && <div className="mb-3 text-rose-400 text-sm">{hofError}</div>}
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="text-neutral-400 border-b border-neutral-800">
-                      <th className="text-left py-2 pr-4">Rank</th>
-                      <th className="text-left py-2 pr-4">Player</th>
-                      <th className="text-left py-2">Score</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {hofRows.length === 0 && !hofBusy && (
-                      <tr>
-                        <td colSpan={3} className="py-8 text-neutral-500 text-center">No data yet. Click “Fetch Hall of Fame”.</td>
-                      </tr>
-                    )}
-                    {hofRows.map((r) => (
-                      <tr key={`${r.rank}-${r.player}`} className="border-b border-neutral-900 hover:bg-neutral-900/50">
-                        <td className="py-2 pr-4 font-mono">{r.rank}</td>
-                        <td className="py-2 pr-4">{r.player}</td>
-                        <td className="py-2">{r.score.toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
-
-          {/* TAB: LEVEL BROWSER */}
-          {tab === 'levels' && (
-            <Card title="Level Browser" right={null}>
-              <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-4">
-                <div className="md:col-span-2">
-                  <label className="text-sm text-neutral-400">Search</label>
-                  <Input
-                    placeholder="Search text…"
-                    value={searchFilter}
-                    onChange={(e) => { setPage(1); setSearchFilter(e.target.value); }}
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-neutral-400">Sort by</label>
-                  <Select
-                    value={sortBy}
-                    onChange={(e) => { setPage(1); setSortBy(e.target.value as SortBy); }}
-                  >
-                    <option value="ratings">Ratings</option>
-                    <option value="newest">Newest</option>
-                    <option value="downloads">Downloads</option>
-                    <option value="difficulty">Difficulty</option>
-                  </Select>
-                </div>
-                <div>
-                  <label className="text-sm text-neutral-400">Difficulty</label>
-                  <Select
-                    value={difficulty}
-                    onChange={(e) => { setPage(1); setDifficulty(e.target.value as Difficulty); }}
-                  >
-                    <option value="">(Any)</option>
-                    <option value="A">A</option>
-                    <option value="B">B</option>
-                    <option value="C">C</option>
-                    <option value="D">D</option>
-                    <option value="E">E</option>
-                  </Select>
-                </div>
-                <div className="flex items-end">
-                  <Button onClick={() => { setPage(1); void fetchLevels(); }} disabled={levelsBusy || !uniqueId || !token}>
-                    {levelsBusy ? 'Loading…' : 'Fetch Levels'}
-                  </Button>
-                </div>
-              </div>
-
-              {levelsError && <div className="mb-3 text-rose-400 text-sm">{levelsError}</div>}
-
-              <div className="overflow-x-auto rounded-xl border border-neutral-800">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="bg-neutral-900/60 text-neutral-400">
-                      <th className="text-left px-4 py-2">Name</th>
-                      <th className="text-left px-4 py-2">Author</th>
-                      <th className="text-left px-4 py-2">Rating</th>
-                      <th className="text-left px-4 py-2">Difficulty</th>
-                      <th className="text-left px-4 py-2">Downloads</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {levels.length === 0 && !levelsBusy && (
-                      <tr>
-                        <td colSpan={5} className="py-8 text-neutral-500 text-center">
-                          No levels yet. Adjust filters and click “Fetch Levels”.
-                        </td>
-                      </tr>
-                    )}
-                    {levels.map((lvl) => (
-                      <tr key={`${lvl.levelId}-${lvl.levelAuthor}`} className="border-t border-neutral-900 hover:bg-neutral-900/50">
-                        <td className="px-4 py-2">{lvl.levelName}</td>
-                        <td className="px-4 py-2">{lvl.levelAuthor}</td>
-                        <td className="px-4 py-2">{Number.isFinite(lvl.levelRating) ? lvl.levelRating.toFixed(2) : '—'}</td>
-                        <td className="px-4 py-2">{lvl.levelDifficulty || '—'}</td>
-                        <td className="px-4 py-2">{Number.isFinite(lvl.levelDownloads) ? lvl.levelDownloads.toLocaleString() : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="mt-4 flex items-center justify-between">
-                <div className="text-neutral-400 text-sm">Page {page}{hasMore ? '' : ' (last page)'}</div>
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => { if (page > 1) setPage(page - 1); }}
-                    disabled={page <= 1 || levelsBusy}
-                    className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200"
-                  >
-                    Prev
-                  </Button>
-                  <Button
-                    onClick={() => { if (hasMore) setPage(page + 1); }}
-                    disabled={!hasMore || levelsBusy}
-                    className="bg-neutral-800 hover:bg-neutral-700 text-neutral-200"
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          )}
-
-          {/* TAB: SUBMIT LEVEL (WIP) */}
-          {tab === 'submit' && (
-            <Card
-              title="Submit Level"
-              right={<span className="px-3 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-xs border border-amber-700/40">WORK IN PROGRESS</span>}
-            >
-              <p className="text-neutral-400">
-                This feature is under active development. For now, use the desktop tool to submit levels.
-              </p>
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 opacity-60 pointer-events-none select-none">
-                <div>
-                  <label className="text-sm text-neutral-500">Level Name (base64-encoded by server)</label>
-                  <Input placeholder="Auto-encoded on submit" disabled />
-                </div>
-                <div>
-                  <label className="text-sm text-neutral-500">Difficulty</label>
-                  <Select disabled>
-                    <option>Choose…</option>
-                  </Select>
-                </div>
-                <div className="md:col-span-2">
-                  <label className="text-sm text-neutral-500">Level Data</label>
-                  <textarea
-                    className="w-full min-h-[160px] px-3 py-2 rounded-xl bg-neutral-800 border border-neutral-700 text-neutral-100"
-                    placeholder="Paste levelData here…"
-                    disabled
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <Button disabled>Submit (WIP)</Button>
-                </div>
-              </div>
-            </Card>
-          )}
+      {/* AUTH */}
+      <Card title="Auth" right={<span className={`pill ${authed?"ok":"warn"}`}>{authed?"Authenticated":"Not authenticated"}</span>}>
+        <Row label="Unique ID">
+          <input inputMode="numeric" placeholder="e.g. 15206" value={uniqueId} onChange={e=>setUniqueId(e.target.value)} />
+        </Row>
+        <Row label="Token">
+          <input placeholder="token" value={token} onChange={e=>setToken(e.target.value)} />
+        </Row>
+        <div className="actions">
+          <button onClick={doAuth} disabled={loading || !uniqueId || !token}>Authenticate</button>
         </div>
+      </Card>
 
-        <footer className="mt-10 text-center text-xs text-neutral-500">
-          backend: <span className="text-neutral-300">{API_BASE || 'not set (NEXT_PUBLIC_API_BASE)'}</span>
-        </footer>
-      </div>
+      {/* TABS CONTENT */}
+      {tab === "browser" && (
+        <Card title="Search Levels">
+          <div className="grid2">
+            <Row label="Sort by">
+              <select value={sortBy} onChange={e=>setSortBy(e.target.value as SortBy)}>
+                <option value="recent">recent</option>
+                <option value="downloads">downloads</option>
+                <option value="ratings">ratings</option>
+              </select>
+            </Row>
+            <Row label="Page">
+              <input inputMode="numeric" value={String(page)} onChange={e=>setPage(Number(e.target.value)||1)} />
+            </Row>
+            <Row label="Difficulty (optional)">
+              <select value={difficulty} onChange={e=>setDifficulty(e.target.value as Difficulty)}>
+                <option value="">(leave blank)</option>
+                {(["D","C","B","A","S","SS","SSS"] as Difficulty[]).map(d=> (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </Row>
+            <Row label="Search">
+              <input placeholder="filter text" value={filter} onChange={e=>setFilter(e.target.value)} />
+            </Row>
+          </div>
+          <div className="actions">
+            <button onClick={fetchLevels} disabled={loading}>Fetch</button>
+          </div>
+
+          <div className="tableWrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style={{width:"28%"}}>Level</th>
+                  <th style={{width:"24%"}}>Author</th>
+                  <th style={{width:"12%"}}>Rating</th>
+                  <th style={{width:"12%"}}>Difficulty</th>
+                  <th style={{width:"12%"}}>Downloads</th>
+                </tr>
+              </thead>
+              <tbody>
+                {levels.length === 0 && (
+                  <tr><td colSpan={5} className="empty">No results</td></tr>
+                )}
+                {levels.map((lv, i) => (
+                  <tr key={`${lv.levelId}-${i}`}>
+                    <td>{decodeBase64(lv.levelId)}</td>
+                    <td>{decodeBase64(lv.levelAuthor)}</td>
+                    <td>{lv.levelRating.toFixed(1)}</td>
+                    <td>{lv.levelDifficulty}</td>
+                    <td>{lv.levelDownloads}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="pager">
+            <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page<=1}>◀ Prev</button>
+            <span>Page {page}</span>
+            <button onClick={()=>setPage(p=>p+1)} disabled={!hasMore}>Next ▶</button>
+          </div>
+        </Card>
+      )}
+
+      {tab === "hof" && (
+        <Card title="Hall of Fame">
+          <div className="tableWrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Player</th>
+                  <th>Map</th>
+                  <th style={{width:120}}>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hof.length===0 && <tr><td colSpan={3} className="empty">No entries yet</td></tr>}
+                {hof.map((e,idx)=> (
+                  <tr key={idx}>
+                    <td>{e.player}</td>
+                    <td>{e.map}</td>
+                    <td>{e.time}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {tab === "submit" && (
+        <Card title="Submit Level" right={<span className="pill warn">WORK IN PROGRESS</span>}>
+          <p className="muted">This tab is intentionally disabled for now.</p>
+        </Card>
+      )}
+
+      <footer>
+        <span>NeoDash Toolkit · Dark UI</span>
+      </footer>
+
+      <style jsx global>{`
+        :root{ --bg:#0a0c11; --text:#dbe7ff; --muted:#9fb0ff; }
+        html,body,#__next{ height:100%; }
+        body{ margin:0; background:radial-gradient(1200px 600px at 20% -10%, rgba(61,94,234,.15), transparent), #0a0c11; color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji; }
+        *{ box-sizing:border-box; }
+        table{ width:100%; border-collapse:separate; border-spacing:0 8px; }
+        thead th{ text-align:left; font-size:12px; color:#8aa0ff; font-weight:700; padding:0 10px; }
+        tbody tr{ background:#0d1017; border:1px solid #1d2436; }
+        tbody td{ padding:12px 10px; }
+        tbody tr:hover{ border-color:#2d3e74; }
+        .empty{ color:#6a78a8; text-align:center; padding:24px; }
+        .tableWrap{ margin-top:14px; }
+        .pager{ display:flex; gap:12px; align-items:center; justify-content:flex-end; margin-top:12px; }
+        .pill{ padding:6px 10px; border-radius:999px; font-size:12px; border:1px solid #2a3a6a; background:#112042;}
+        .pill.ok{ color:#90fbbd; border-color:#206a45; background:#0f2a22; }
+        .pill.warn{ color:#ffeaa6; border-color:#5e4a13; background:#2a210a; }
+        .muted{ color:#8aa0ff; opacity:.8; }
+      `}</style>
+      <style jsx>{`
+        main{ max-width:1100px; margin:40px auto; padding:0 20px; display:flex; flex-direction:column; gap:18px; }
+        header{ display:flex; align-items:center; gap:14px; }
+        header h1{ margin:0; font-size:22px; letter-spacing:.4px; }
+        header .badge{ font-size:12px; color:#9fb0ff; border:1px dashed #2a3a6a; padding:6px 10px; border-radius:10px; }
+        .grow{ flex:1 }
+        .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:8px 24px; }
+        .actions{ display:flex; gap:10px; }
+        footer{ opacity:.6; font-size:12px; padding:14px 4px; text-align:center; }
+        @media (max-width: 880px){ .grid2{ grid-template-columns:1fr; } }
+      `}</style>
     </main>
   );
-};
-
-export default IndexPage;
+}
