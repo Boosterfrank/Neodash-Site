@@ -1,335 +1,279 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-// ---- Small fetch helper (points to your backend) ---------------------------
-const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001").replace(/\/+$/, "");
+// Reusable UI primitives (keeps the look consistent everywhere)
+const cx = (...c: (string | false | undefined)[]) => c.filter(Boolean).join(" ");
 
-async function postJSON<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status} ${text}`);
-  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
-}
+const Card: React.FC<React.PropsWithChildren<{ title?: string; right?: React.ReactNode; className?: string }>> = ({ title, right, className, children }) => (
+  <div className={cx(
+    "rounded-2xl bg-[#0c1220]/80 backdrop-blur border border-white/10 shadow-xl",
+    "p-5 sm:p-6", className
+  )}>
+    {(title || right) && (
+      <div className="mb-4 flex items-center gap-2">
+        {title && <h2 className="text-lg font-semibold text-white/90 tracking-wide">{title}</h2>}
+        <div className="ml-auto text-sm text-white/60">{right}</div>
+      </div>
+    )}
+    {children}
+  </div>
+);
 
-// ---- Types -----------------------------------------------------------------
-export type SortBy = "ratings" | "downloads" | "recent";
-export type Difficulty = "" | "D" | "C" | "B" | "A" | "S" | "SS" | "SSS";
+const Label: React.FC<React.PropsWithChildren<{ htmlFor?: string }>> = ({ htmlFor, children }) => (
+  <label htmlFor={htmlFor} className="block text-[13px] font-medium text-white/70 mb-1.5">
+    {children}
+  </label>
+);
 
-interface AuthState { uniqueId: number; token: string; ok: boolean }
-
-interface LevelRow {
-  levelId: string;           // base64 id from server (decoded for UI below)
-  levelAuthor: string;       // base64 author (decoded for UI below)
-  levelRating: number;       // e.g. 4.4
-  levelDifficulty: string;   // e.g. "B"
-  levelDownloads: number;    // e.g. 1287
-}
-
-interface LevelListResponse {
-  levels: LevelRow[];
-  hasMoreLevels: boolean;
-}
-
-interface HofEntry { player: string; time: string; map: string }
-
-// ---- UI primitives ---------------------------------------------------------
-function Card(props: { title?: string; right?: React.ReactNode; className?: string; children?: React.ReactNode }) {
-  const { title, right, className, children } = props;
-  return (
-    <div className={`card ${className ?? ""}`}>
-      {(title || right) && (
-        <div className="cardHead">
-          {title && <h2>{title}</h2>}
-          <div className="spacer" />
-          {right}
-        </div>
+const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
+  ({ className, ...props }, ref) => (
+    <input
+      ref={ref}
+      className={cx(
+        "w-full h-9 rounded-lg px-3 text-[13px] text-white/90",
+        "bg-white/5 border border-white/10 outline-none",
+        "focus:(border-sky-400/60 ring-2 ring-sky-400/20)",
+        className
       )}
-      {children}
-      <style jsx>{`
-        .card { background:#0e1014; border:1px solid #1e2330; border-radius:14px; padding:16px; box-shadow:0 8px 22px rgba(0,0,0,.35);}
-        .cardHead{ display:flex; align-items:center; margin-bottom:12px;}
-        h2{ font-size:16px; font-weight:600; margin:0; color:#e6ebff; letter-spacing:.3px;}
-        .spacer{ flex:1 }
-      `}</style>
-    </div>
-  );
-}
+      {...props}
+    />
+  )
+);
+Input.displayName = "Input";
 
-function Row(props:{label:string; children?:React.ReactNode}){
-  return (
-    <label className="row">
-      <span>{props.label}</span>
-      {props.children}
-      <style jsx>{`
-        .row{ display:grid; grid-template-columns:160px 1fr; align-items:center; gap:12px; margin:10px 0; }
-        .row>span{ color:#9fb0ff; font-size:13px; }
-        input, select { background:#0a0c10; color:#e6ebff; border:1px solid #2a3246; border-radius:10px; padding:10px 12px; outline:none; }
-        input:focus, select:focus{ border-color:#5580ff; box-shadow:0 0 0 3px rgba(85,128,255,.2);}
-        button { background:#1b2748; color:#e6ebff; border:1px solid #2a3a6a; border-radius:10px; padding:10px 14px; cursor:pointer; font-weight:600; letter-spacing:.2px;}
-        button:hover{ background:#21305a; }
-        button:disabled{ opacity:.5; cursor:not-allowed; }
-      `}</style>
-    </label>
-  );
-}
+const Select: React.FC<React.SelectHTMLAttributes<HTMLSelectElement>> = ({ className, children, ...props }) => (
+  <select
+    className={cx(
+      "w-full h-9 rounded-lg px-3 text-[13px] text-white/90",
+      "bg-white/5 border border-white/10 outline-none appearance-none",
+      "focus:(border-sky-400/60 ring-2 ring-sky-400/20)",
+      className
+    )}
+    {...props}
+  >
+    {children}
+  </select>
+);
 
-function Tabs(props:{tabs:{key:string; label:string; badge?:string}[]; value:string; onChange:(k:string)=>void}){
-  const { tabs, value, onChange } = props;
-  return (
-    <div className="tabs">
-      {tabs.map(t => (
-        <button key={t.key} className={`tab ${t.key===value?"active":""}`} onClick={()=>onChange(t.key)}>
-          <span>{t.label}</span>{t.badge && <em>{t.badge}</em>}
-        </button>
-      ))}
-      <style jsx>{`
-        .tabs{ display:flex; gap:8px; flex-wrap:wrap; }
-        .tab{ background:#0e1322; border:1px solid #233158; color:#cbd7ff; padding:10px 14px; border-radius:999px; font-weight:600; }
-        .tab.active{ background:#2a3f7a; border-color:#3d5eea; color:white; }
-        .tab em{ margin-left:8px; background:#1f2b4e; border:1px solid #2f417a; padding:2px 8px; border-radius:999px; font-style:normal; font-size:12px;}
-      `}</style>
-    </div>
-  );
-}
+const Button: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "ghost" }>
+= ({ className, variant = "primary", children, ...props }) => (
+  <button
+    className={cx(
+      "inline-flex items-center justify-center gap-2 h-9 px-3 rounded-lg text-[13px]",
+      variant === "primary"
+        ? "bg-sky-500/90 text-white hover:bg-sky-400 active:bg-sky-500"
+        : "bg-white/5 text-white/80 hover:bg-white/10",
+      "border border-white/10 shadow hover:shadow-sky-500/10 transition",
+      className
+    )}
+    {...props}
+  >
+    {children}
+  </button>
+);
 
-// ---- Page ------------------------------------------------------------------
-export default function HomePage() {
-  // tabs
-  const [tab, setTab] = useState<string>("browser");
+const Pill: React.FC<React.PropsWithChildren<{}>> = ({ children }) => (
+  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white/70">{children}</span>
+);
 
-  // auth
-  const [uniqueId, setUniqueId] = useState<string>("");
-  const [token, setToken] = useState<string>("");
-  const [auth, setAuth] = useState<AuthState | null>(null);
-  const authed = !!auth?.ok;
+/* ----------------------- Page ----------------------- */
 
-  // browser
+type SortBy = "ratings" | "downloads" | "recent";
+
+type TabKey = "browser" | "hof" | "submit";
+
+export default function NeoDashToolkit() {
+  const [active, setActive] = useState<TabKey>("browser");
+
+  // Auth
+  const [uniqueId, setUniqueId] = useState("15206");
+  const [token, setToken] = useState("");
+  const [authed, setAuthed] = useState(false);
+
+  // Search
   const [sortBy, setSortBy] = useState<SortBy>("ratings");
-  const [page, setPage] = useState<number>(1);
-  const [difficulty, setDifficulty] = useState<Difficulty>(""); // blank default
-  const [filter, setFilter] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(false);
-  const [levels, setLevels] = useState<LevelRow[]>([]);
-  const [hasMore, setHasMore] = useState<boolean>(false);
+  const [page, setPage] = useState(1);
+  const [difficulty, setDifficulty] = useState(""); // blank by default
+  const [search, setSearch] = useState("");
 
-  // HOF
-  const [hof, setHof] = useState<HofEntry[]>([]);
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
 
-  const decodeBase64 = useCallback((b64: string): string => {
-    try { return Buffer.from(b64, "base64").toString("utf8"); } catch { return b64; }
-  }, []);
+  const difficultyOptions = ["", "D", "C", "B", "A", "S", "SS", "SSS"];
 
-  const doAuth = useCallback(async () => {
+  const doAuth = async () => {
     try {
-      setLoading(true);
-      const uid = Number(uniqueId);
-      const resp = await postJSON<{ ok:boolean }>("/authenticate", { uniqueId: uid, token: token.trim() });
-      setAuth({ uniqueId: uid, token: token.trim(), ok: resp.ok });
-      alert("Authenticated!");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Auth error: ${msg}`);
-    } finally { setLoading(false); }
-  }, [uniqueId, token]);
-
-  const fetchLevels = useCallback(async () => {
-    try {
-      setLoading(true);
-      const resp = await postJSON<LevelListResponse>("/requestLevelList", {
-        uniqueId: auth?.uniqueId ?? 0,
-        token: auth?.token ?? "",
-        sortBy,
-        page,
-        withThumbnails: false,
-        difficulty,
-        searchFilter: filter,
+      const r = await fetch(`${backendUrl}/authenticate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uniqueId, token })
       });
-      setLevels(resp.levels);
-      setHasMore(!!resp.hasMoreLevels);
+      if (!r.ok) throw new Error(`Upstream ${r.status}`);
+      setAuthed(true);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Fetch error: ${msg}`);
-    } finally { setLoading(false); }
-  }, [auth, sortBy, page, difficulty, filter]);
+      alert(`Auth error: ${e}`);
+      setAuthed(false);
+    }
+  };
 
-  const fetchHof = useCallback(async () => {
+  const fetchList = async () => {
+    setLoading(true);
+    setRows([]);
     try {
-      setLoading(true);
-      const resp = await postJSON<{ entries:HofEntry[] }>("/hof", { page: 1 });
-      setHof(resp.entries);
+      const params = new URLSearchParams({
+        sortBy,
+        page: String(page),
+        withThumbnails: "FALSE",
+        difficulty, // blank means no filter
+        searchFilter: search
+      });
+      const r = await fetch(`${backendUrl}/requestLevelList?${params.toString()}`);
+      const data = await r.json();
+      setRows(data.levels || []);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`HOF error: ${msg}`);
-    } finally { setLoading(false); }
-  }, []);
+      alert(`Fetch error: ${e}`);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  useEffect(() => { if (tab === "hof" && hof.length === 0) void fetchHof(); }, [tab, hof.length, fetchHof]);
+  const TabButton: React.FC<{ k: TabKey; label: string; badge?: string }>
+    = ({ k, label, badge }) => (
+    <button
+      onClick={() => setActive(k)}
+      className={cx(
+        "h-9 px-3 rounded-xl text-sm border",
+        active === k
+          ? "bg-white/10 text-white border-white/20"
+          : "text-white/70 border-white/10 hover:bg-white/5"
+      )}
+    >
+      <span>{label}</span>
+      {badge && <span className="ml-2 text-[11px] opacity-70">{badge}</span>}
+    </button>
+  );
 
   return (
-    <main>
-      <header>
-        <h1>NeoDash Toolkit</h1>
-        <div className="grow" />
-        <span className="badge">Backend: {API_BASE}</span>
-      </header>
-
-      <Tabs
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { key: "browser", label: "Level Browser" },
-          { key: "hof", label: "Hall of Fame" },
-          { key: "submit", label: "Submit Level", badge: "WIP" },
-        ]}
-      />
-
-      {/* AUTH */}
-      <Card title="Auth" right={<span className={`pill ${authed?"ok":"warn"}`}>{authed?"Authenticated":"Not authenticated"}</span>}>
-        <Row label="Unique ID">
-          <input inputMode="numeric" placeholder="e.g. 15206" value={uniqueId} onChange={e=>setUniqueId(e.target.value)} />
-        </Row>
-        <Row label="Token">
-          <input placeholder="token" value={token} onChange={e=>setToken(e.target.value)} />
-        </Row>
-        <div className="actions">
-          <button onClick={doAuth} disabled={loading || !uniqueId || !token}>Authenticate</button>
+    <div className="min-h-screen bg-[#070b14] text-white/90">
+      <div className="mx-auto max-w-6xl px-4 py-6">
+        {/* Header */}
+        <div className="mb-6 flex items-center gap-3">
+          <h1 className="text-2xl font-bold tracking-tight">NeoDash Toolkit</h1>
+          <div className="ml-auto">
+            <Pill>Backend: {backendUrl}</Pill>
+          </div>
         </div>
-      </Card>
 
-      {/* TABS CONTENT */}
-      {tab === "browser" && (
-        <Card title="Search Levels">
-          <div className="grid2">
-            <Row label="Sort by">
-              <select value={sortBy} onChange={e=>setSortBy(e.target.value as SortBy)}>
-                <option value="recent">recent</option>
-                <option value="downloads">downloads</option>
-                <option value="ratings">ratings</option>
-              </select>
-            </Row>
-            <Row label="Page">
-              <input inputMode="numeric" value={String(page)} onChange={e=>setPage(Number(e.target.value)||1)} />
-            </Row>
-            <Row label="Difficulty (optional)">
-              <select value={difficulty} onChange={e=>setDifficulty(e.target.value as Difficulty)}>
-                <option value="">(leave blank)</option>
-                {(["D","C","B","A","S","SS","SSS"] as Difficulty[]).map(d=> (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
-            </Row>
-            <Row label="Search">
-              <input placeholder="filter text" value={filter} onChange={e=>setFilter(e.target.value)} />
-            </Row>
+        {/* Tabs */}
+        <div className="mb-6 flex gap-2">
+          <TabButton k="browser" label="Level Browser" />
+          <TabButton k="hof" label="Hall of Fame" />
+          <TabButton k="submit" label="Submit Level" badge="WIP" />
+        </div>
+
+        {active === "browser" && (
+          <div className="space-y-6">
+            <Card title="Auth" right={<Pill>{authed ? "Authenticated" : "Not authenticated"}</Pill>}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="uid">Unique ID</Label>
+                  <Input id="uid" placeholder="e.g. 15206" value={uniqueId} onChange={(e) => setUniqueId(e.target.value)} />
+                </div>
+                <div>
+                  <Label htmlFor="tok">Token</Label>
+                  <Input id="tok" placeholder="token" value={token} onChange={(e) => setToken(e.target.value)} />
+                </div>
+              </div>
+              <div className="mt-4">
+                <Button onClick={doAuth}>Authenticate</Button>
+              </div>
+            </Card>
+
+            <Card title="Search Levels">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div>
+                  <Label>Sort by</Label>
+                  <Select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortBy)}>
+                    <option value="ratings">ratings</option>
+                    <option value="downloads">downloads</option>
+                    <option value="recent">recent</option>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Page</Label>
+                  <Input type="number" min={1} value={page} onChange={(e) => setPage(parseInt(e.target.value || "1", 10))} />
+                </div>
+                <div>
+                  <Label>Difficulty (optional)</Label>
+                  <Select value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
+                    {difficultyOptions.map((d) => (
+                      <option key={d || "blank"} value={d}>{d ? d : "(leave blank)"}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <Label>Search</Label>
+                  <Input placeholder="filter text" value={search} onChange={(e) => setSearch(e.target.value)} />
+                </div>
+              </div>
+              <div className="mt-4">
+                <Button onClick={fetchList}>Fetch</Button>
+              </div>
+
+              <div className="mt-6 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-white/60">
+                    <tr className="border-b border-white/10">
+                      <th className="py-2 pr-4">Level</th>
+                      <th className="py-2 pr-4">Author</th>
+                      <th className="py-2 pr-4">Rating</th>
+                      <th className="py-2 pr-4">Difficulty</th>
+                      <th className="py-2 pr-4">Downloads</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loading ? (
+                      <tr><td className="py-6 text-center text-white/50" colSpan={5}>Loading…</td></tr>
+                    ) : rows.length === 0 ? (
+                      <tr><td className="py-6 text-center text-white/50" colSpan={5}>No results</td></tr>
+                    ) : (
+                      rows.map((r, i) => (
+                        <tr key={i} className="border-b border-white/5 hover:bg-white/5">
+                          <td className="py-2 pr-4">{r.levelName ?? r.levelId ?? "—"}</td>
+                          <td className="py-2 pr-4">{r.levelAuthor ?? "—"}</td>
+                          <td className="py-2 pr-4">{r.levelRating ?? "—"}</td>
+                          <td className="py-2 pr-4">{r.levelDifficulty ?? "—"}</td>
+                          <td className="py-2 pr-4">{r.levelDownloads ?? "—"}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-4 flex items-center gap-2">
+                <Button variant="ghost" onClick={() => setPage((p) => Math.max(1, p - 1))}>&lt; Prev</Button>
+                <span className="text-white/70 text-sm">Page {page}</span>
+                <Button variant="ghost" onClick={() => setPage((p) => p + 1)}>Next &gt;</Button>
+              </div>
+            </Card>
           </div>
-          <div className="actions">
-            <button onClick={fetchLevels} disabled={loading}>Fetch</button>
-          </div>
+        )}
 
-          <div className="tableWrap">
-            <table>
-              <thead>
-                <tr>
-                  <th style={{width:"28%"}}>Level</th>
-                  <th style={{width:"24%"}}>Author</th>
-                  <th style={{width:"12%"}}>Rating</th>
-                  <th style={{width:"12%"}}>Difficulty</th>
-                  <th style={{width:"12%"}}>Downloads</th>
-                </tr>
-              </thead>
-              <tbody>
-                {levels.length === 0 && (
-                  <tr><td colSpan={5} className="empty">No results</td></tr>
-                )}
-                {levels.map((lv, i) => (
-                  <tr key={`${lv.levelId}-${i}`}>
-                    <td>{decodeBase64(lv.levelId)}</td>
-                    <td>{decodeBase64(lv.levelAuthor)}</td>
-                    <td>{lv.levelRating.toFixed(1)}</td>
-                    <td>{lv.levelDifficulty}</td>
-                    <td>{lv.levelDownloads}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        {active === "hof" && (
+          <Card title="Hall of Fame">
+            <p className="text-white/70 text-sm">Coming soon.</p>
+          </Card>
+        )}
 
-          <div className="pager">
-            <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page<=1}>◀ Prev</button>
-            <span>Page {page}</span>
-            <button onClick={()=>setPage(p=>p+1)} disabled={!hasMore}>Next ▶</button>
-          </div>
-        </Card>
-      )}
+        {active === "submit" && (
+          <Card title="Submit Level" right={<Pill>WORK IN PROGRESS</Pill>}>
+            <p className="text-white/70 text-sm">This feature is intentionally disabled for now.</p>
+          </Card>
+        )}
 
-      {tab === "hof" && (
-        <Card title="Hall of Fame">
-          <div className="tableWrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Player</th>
-                  <th>Map</th>
-                  <th style={{width:120}}>Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {hof.length===0 && <tr><td colSpan={3} className="empty">No entries yet</td></tr>}
-                {hof.map((e,idx)=> (
-                  <tr key={idx}>
-                    <td>{e.player}</td>
-                    <td>{e.map}</td>
-                    <td>{e.time}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {tab === "submit" && (
-        <Card title="Submit Level" right={<span className="pill warn">WORK IN PROGRESS</span>}>
-          <p className="muted">This tab is intentionally disabled for now.</p>
-        </Card>
-      )}
-
-      <footer>
-        <span>NeoDash Toolkit · Dark UI</span>
-      </footer>
-
-      <style jsx global>{`
-        :root{ --bg:#0a0c11; --text:#dbe7ff; --muted:#9fb0ff; }
-        html,body,#__next{ height:100%; }
-        body{ margin:0; background:radial-gradient(1200px 600px at 20% -10%, rgba(61,94,234,.15), transparent), #0a0c11; color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, Apple Color Emoji, Segoe UI Emoji; }
-        *{ box-sizing:border-box; }
-        table{ width:100%; border-collapse:separate; border-spacing:0 8px; }
-        thead th{ text-align:left; font-size:12px; color:#8aa0ff; font-weight:700; padding:0 10px; }
-        tbody tr{ background:#0d1017; border:1px solid #1d2436; }
-        tbody td{ padding:12px 10px; }
-        tbody tr:hover{ border-color:#2d3e74; }
-        .empty{ color:#6a78a8; text-align:center; padding:24px; }
-        .tableWrap{ margin-top:14px; }
-        .pager{ display:flex; gap:12px; align-items:center; justify-content:flex-end; margin-top:12px; }
-        .pill{ padding:6px 10px; border-radius:999px; font-size:12px; border:1px solid #2a3a6a; background:#112042;}
-        .pill.ok{ color:#90fbbd; border-color:#206a45; background:#0f2a22; }
-        .pill.warn{ color:#ffeaa6; border-color:#5e4a13; background:#2a210a; }
-        .muted{ color:#8aa0ff; opacity:.8; }
-      `}</style>
-      <style jsx>{`
-        main{ max-width:1100px; margin:40px auto; padding:0 20px; display:flex; flex-direction:column; gap:18px; }
-        header{ display:flex; align-items:center; gap:14px; }
-        header h1{ margin:0; font-size:22px; letter-spacing:.4px; }
-        header .badge{ font-size:12px; color:#9fb0ff; border:1px dashed #2a3a6a; padding:6px 10px; border-radius:10px; }
-        .grow{ flex:1 }
-        .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:8px 24px; }
-        .actions{ display:flex; gap:10px; }
-        footer{ opacity:.6; font-size:12px; padding:14px 4px; text-align:center; }
-        @media (max-width: 880px){ .grid2{ grid-template-columns:1fr; } }
-      `}</style>
-    </main>
+        <footer className="mt-10 text-center text-xs text-white/50">NeoDash Toolkit · Dark UI</footer>
+      </div>
+    </div>
   );
 }
